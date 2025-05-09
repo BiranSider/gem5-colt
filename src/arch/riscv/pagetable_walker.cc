@@ -321,8 +321,9 @@ Walker::WalkerState::startFunctional(Addr &addr, unsigned &logBytes)
 bool
 Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
 {
-    // Simulates a gate-oriented comparision of two PTEs to detect if they are physically 
-    // contagious
+    /* Simulates a gate-oriented comparision of two PTEs to detect if they
+    are physically contagious
+    */
     if (first_pte.perm == second_pte.perm && first_pte)
     {
         Addr first_ppn = (level == 1) ? first_pte.ppn1: first_pte.ppn2;
@@ -332,27 +333,29 @@ Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
     return false;
 }
 
+union bitwize_casting {
+    uint8_t asInt;
+    bool asBits[8];
+};
+
 int8_t
 Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
 {
     /*
     Creates a contagious indicator for each PTE in the cacheline
     It does so in reference to the previous entry
-
     The assumption here is that in hardware you would create a defualt entry and mask it
     with the value from the index to "fix" it to the required entry in a bitwize operation
     */
-    union bitwize_casting {
-        uint8_t asInt;
-        bool asBits[8];
-    };
     bitwize_casting readInfoCoalesingEntry;
-    readInfoCoalesingEntry.asInt = 0;
+    // The first one is the same as itself (reference)
+    readInfoCoalesingEntry.asInt = 1;
     for (int i = 1; i < 8; i++)
     {
         PTESv39 first_pte = readInfo->getOffsetLE<uint64_t>(i-1);
         PTESv39 second_pte = readInfo->getOffsetLE<uint64_t>(i);
-        readInfoCoalesingEntry.asInt += this->isContaigous(level, first_pte, second_pte) ? (1 << i) : 0;
+        readInfoCoalesingEntry.asInt += 
+            this->isContaigous(level, first_pte, second_pte) ? (1 << i) : 0;
     }
 
     uint64_t readIndex = readInfo->getIdx();
@@ -360,7 +363,7 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
     if (readIndex > 0) {
         for (int i = readIndex - 1; i > 0; i--)
         {
-            // Apply backgwards, if it was already 0 it doesn't matter but only contaigous 1 would work
+            // if it was already 0 it doesn't matter but only contaigous 1 would work
             readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i+1];
         }
     }
@@ -371,55 +374,60 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
             readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i-1];
         }
     }
-    //std::bitset<8> x = readInfoCoalesingEntry.asInt;
-    DPRINTF(PageTableWalker, "Coalesing Entry is: %d\n", readInfoCoalesingEntry.asInt);
+    // No matter what - validate the intended index itself.
+    readInfoCoalesingEntry.asBits[readIndex] = 1;
 
+    // At this point this contains the is valid in comparision to the index
+    DPRINTF(PageTableWalker, "Coalesing Entry is: %d\n", readInfoCoalesingEntry.asInt);
     return readInfoCoalesingEntry.asInt;
 }
 
-void
-Walker::detectCoalesing(PacketPtr &read_pte, int level)
+PTESv39
+Walker::getBaseCoalesingEntry(PacketPtr &readInfo, uint8_t coalesingData)
 {
-    // This doesn't verify permissions which is also required... but let's see
-    uint64_t target_idx = read_pte->getIdx();
-    PTESv39 target_pte = read_pte->getOffsetLE<uint64_t>(target_idx);
-    uint64_t sze = 1;
-    Addr target_page_frame = target_pte.ppn;
-    if (level == 0)
-        return;
-    Addr target_ppn = (level == 1) ? target_pte.ppn1: target_pte.ppn2;
-    for (int i = target_idx-1; i > 0; i--)
-    {
-        PTESv39 curr_pte = read_pte->getOffsetLE<uint64_t>(i);
-        Addr curr_ppn = (level == 1) ? curr_pte.ppn1: curr_pte.ppn2;
-        if (target_ppn - curr_ppn == target_idx - i && target_idx != i && curr_pte.w == target_pte.w && curr_pte.x == target_pte.x)
-        {
-            DPRINTF(PageTableWalker, "Target[%d]: %#X[%#x]\tCurrent[%d], %#X[%#x]\n", target_idx, target_pte, target_ppn, i, curr_pte, curr_ppn);
-            sze+=1;
-        }
-        else
-        {
-            break;
-        }
+    bitwize_casting readInfoCoalesingEntry;
+    readInfoCoalesingEntry.asInt = coalesingData;
+    bitwize_casting lowestIndex;
+
+    for (int i=0; i < 7; i++) {
+        // We only want to preserve the lowest on bit for reference
+        // The logic is Bi & (Bi ^ Bi+1) 
+        /*
+        Bi  |   Bi+1    |   Res
+        0   |   0       |   0
+        1   |   0       |   1
+        0   |   1       |   0
+        1   |   1       |   0
+        One can assume an ADC would be used prior to a MUX that would be used
+        to choose the base PTE
+        */
+       bool bi = readInfoCoalesingEntry.asBits[i];
+       bool bi1 = readInfoCoalesingEntry.asBits[i+1];
+       lowestIndex.asBits[i] = bi & (bi ^ bi1);
     }
-    uint64_t start_idx = target_idx - sze + 1;
-    DPRINTF(PageTableWalker, "Testing post prev Start: %d\n", start_idx);
-    for (int i = target_idx; i < 8; i ++)
-    {
-        PTESv39 curr_pte = read_pte->getOffsetLE<uint64_t>(i);
-        Addr curr_ppn = (level == 1) ? curr_pte.ppn1: curr_pte.ppn2;
-        if (target_ppn - curr_ppn == target_idx - i && target_idx != i && curr_pte.w == target_pte.w && curr_pte.x == target_pte.x)
-        {
-            DPRINTF(PageTableWalker, "N Target[%d]: %#X[%#x]\tCurrent[%d], %#X[%#x]\n", target_idx, target_pte, target_ppn, i, curr_pte, curr_ppn);
-            sze+=1;
-        }
-        else
-        {
+    // Default to it because it's the case where None of these will be on
+    int base_entry_index = 7;
+    // Assume ADC logic
+    for (int i=0; i < 7; i++) {
+        if (lowestIndex.asBits[i]) {
+            base_entry_index = i;
             break;
-        }
+        } 
     }
-    DPRINTF(PageTableWalker, "Testing post next sze: %d\n", sze);
+    return readInfo->getOffsetLE<uint64_t>(base_entry_index);
 }
+
+// uint64_t
+// Walker::getCoalesingLength(uint8_t coalesingData, ) {
+//     /*
+//     The final step in this thing is now that we map to a base PTE with a new size...
+
+//     Understand how to:
+//         1. TAG the data correctly (since it encompasses more pages)
+//         2. Peresent the length information to through the TLB...
+//     */
+// }
+
 
 Fault
 Walker::WalkerState::stepWalk(PacketPtr &write)
@@ -435,7 +443,7 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
     bool doEndWalk = false;
 
 
-    DPRINTF(PageTableWalker, "[LEVEL%d] Buffer Start: %#x\tIndex: %d (%#x) -> PTE: %#x (r%dw%dv%d ppn %#x)\n", 
+    DPRINTF(PageTableWalker, "[LEVEL%d] Buffer Start: %#x\tIndex: %d (%#x) -> PTE: %#x (r%dw%dv%d ppn %#x)\n",
         level, read->getAddr(), read->getIdx(), read->getAddr() + sizeof(PTESv39) * read->getIdx(), pte, pte.r, pte.w, pte.v, pte.ppn);
     // step 2:
     // Performing PMA/PMP checks on physical address of PTE
@@ -522,13 +530,19 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                                 "#0 leaf node at level %d, with vpn %#x\n",
                                  level, entry.vaddr);
 
+                        // Now that we found the PTE - we want to perform coalesing logic
+                        // walker->detectCoalesing(read, level);
+                        int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
+                        PTESv39 basePte = walker->getBaseCoalesingEntry(read, coalesingData);
+                        entry.coalesingData = coalesingData;
+                        // This isn't correct it's temporary :(
+
+                        uint32_t numberOfPages = pte.ppn - basePte.ppn;
                         // step 8
-
-
-                        entry.logBytes = PageShift + (level * LEVEL_BITS);
-                        entry.paddr = pte.ppn;
+                        entry.logBytes = numberOfPages + PageShift + (level * LEVEL_BITS);
+                        entry.paddr = basePte.ppn;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
-                        entry.pte = pte;
+                        entry.pte = basePte;
                         // put it non-writable into the TLB to detect
                         // writes and redo the page table walk in order
                         // to update the dirty flag.
@@ -585,8 +599,10 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
 
         if (doTLBInsert) {
             if (!functional) {
-                // walker->detectCoalesing(read, level);
-                int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
+                
+                
+                // Fill the entry! 
+
                 Addr vpn = getVPNFromVAddr(entry.vaddr, satp.mode);
                 walker->tlb->insert(vpn, entry);
             } else {
@@ -649,15 +665,9 @@ Walker::WalkerState::setupWalk(Addr vaddr)
     entry.asid = satp.asid;
 
     Request::Flags flags = Request::PHYSICAL;
-    // In thoery here the magic happens - I will modify it but it will break things (:)
-    // The actual thing should be a basic masking + getting multiples, we still need to reserve the innder index.
-
-    // BOOM : Changinbg the start fixed it - need to add some index... (to make it work again)
     RequestPtr request = std::make_shared<Request>(
         readStartAddr, sizeof(PTESv39) * 8, flags, walker->requestorId, sizeof(PTESv39), offsetIdx);
 
-
-    // This fails somehow :(
     read = new Packet(request, MemCmd::ReadReq);
     read->allocate();
     DPRINTF(PageTableWalker, "Test allocation size: %#x\n", read->getSize());

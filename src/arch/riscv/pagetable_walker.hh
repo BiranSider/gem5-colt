@@ -186,9 +186,9 @@ namespace RiscvISA
 
         int8_t indexedCoalesingEntryInformation(int level, PacketPtr &readInfo);
 
-        bool isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte);
+        PTESv39 getBaseCoalesingEntry(PacketPtr &readInfo, uint8_t coalesingData);
 
-        void detectCoalesing(PacketPtr &read_pte, int level);
+        bool isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte);
 
         /**
          * Event used to call startWalkWrapper.
