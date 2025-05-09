@@ -448,6 +448,10 @@ class Request : public Extensible<Request>
     /** The virtual address of the request. */
     Addr _vaddr = MaxAddr;
 
+    Addr _offset = 0;
+
+    unsigned _payload_size = 0;
+
     /**
      * Extra data for the request, such as the return value of
      * store conditional or the compare value for a CAS. */
@@ -489,18 +493,35 @@ class Request : public Extensible<Request>
      * just physical address, size, flags, and timestamp (to curTick()).
      * These fields are adequate to perform a request.
      */
-    Request(Addr paddr, unsigned size, Flags flags, RequestorID id) :
+    Request(Addr paddr, unsigned size, Flags flags, RequestorID id, 
+        unsigned payload_size = 0, Addr offset=0) :
         _paddr(paddr), _size(size), _requestorId(id), _time(curTick())
     {
         _flags.set(flags);
         privateFlags.set(VALID_PADDR|VALID_SIZE);
         _byteEnable = std::vector<bool>(size, true);
         _isGPUFuncAccess = false;
+        if (payload_size == 0)
+            _payload_size = size;
+        else {
+            _payload_size = payload_size;
+            _offset = offset;
+        }
     }
 
+    // Request(Addr vaddr, unsigned size, Flags flags,
+    //         RequestorID id, Addr pc, ContextID cid,
+    //         AtomicOpFunctorPtr atomic_op=nullptr)
+    // {
+    //     setVirt(vaddr, size, flags, id, pc, std::move(atomic_op));
+    //     setContext(cid);
+    //     _byteEnable = std::vector<bool>(size, true);
+    //     _isGPUFuncAccess = false;
+    // }
+
     Request(Addr vaddr, unsigned size, Flags flags,
-            RequestorID id, Addr pc, ContextID cid,
-            AtomicOpFunctorPtr atomic_op=nullptr)
+        RequestorID id, Addr pc, ContextID cid,
+        AtomicOpFunctorPtr atomic_op=nullptr)
     {
         setVirt(vaddr, size, flags, id, pc, std::move(atomic_op));
         setContext(cid);
@@ -642,6 +663,12 @@ class Request : public Extensible<Request>
     }
 
     Addr
+    getOffset() const
+    {
+        return _offset;
+    }
+
+    Addr
     getPaddr() const
     {
         assert(hasPaddr());
@@ -700,6 +727,12 @@ class Request : public Extensible<Request>
     {
         assert(hasSize());
         return _size;
+    }
+
+    unsigned
+     getPayloadSize() const
+    {
+        return _payload_size;
     }
 
     const std::vector<bool>&

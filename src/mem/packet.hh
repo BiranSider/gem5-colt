@@ -823,6 +823,11 @@ class Packet : public Printable, public Extensible<Packet>
      */
     AddrRange getAddrRange() const;
 
+    Addr getIdx() const
+    {
+        return req->getOffset();
+    }
+
     Addr getOffset(unsigned int blk_size) const
     {
         return getAddr() & Addr(blk_size - 1);
@@ -906,6 +911,10 @@ class Packet : public Printable, public Extensible<Packet>
         }
         if (req->hasSize()) {
             size = req->getSize();
+            // if (req->getPayloadSize() == 0)
+            //     size = req->getSize();
+            // else
+            //     size = req->getPayloadSize();
             flags.set(VALID_SIZE);
         }
     }
@@ -1251,6 +1260,9 @@ class Packet : public Printable, public Extensible<Packet>
     template <typename T>
     T getLE() const;
 
+    template <typename T>
+    T getOffsetLE(Addr offset) const;
+
     /**
      * Get the data in the packet byte swapped from the specified
      * endianness.
@@ -1380,6 +1392,9 @@ class Packet : public Printable, public Extensible<Packet>
     /** Get the data in the packet without byte swapping. */
     template <typename T>
     T getRaw() const;
+
+    template <typename T>
+    T getRawOffset(Addr offset) const;
 
     /** Set the value in the data pointer to v without byte swapping. */
     template <typename T>

@@ -184,6 +184,12 @@ namespace RiscvISA
         // Wrapper for checking for squashes before starting a translation.
         void startWalkWrapper();
 
+        int8_t indexedCoalesingEntryInformation(int level, PacketPtr &readInfo);
+
+        bool isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte);
+
+        void detectCoalesing(PacketPtr &read_pte, int level);
+
         /**
          * Event used to call startWalkWrapper.
          **/

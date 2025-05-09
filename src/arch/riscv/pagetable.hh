@@ -97,6 +97,8 @@ struct TlbEntry : public Serializable
     // The size of the page this represents, in address bits.
     unsigned logBytes;
 
+    uint32_t coalesingLength;
+
     uint16_t asid;
 
     PTESv39 pte;

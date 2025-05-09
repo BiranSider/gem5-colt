@@ -47,7 +47,6 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #include "arch/riscv/pagetable_walker.hh"
 
 #include <memory>
@@ -156,9 +155,11 @@ Walker::recvReqRetry()
 
 bool Walker::sendTiming(WalkerState* sendingState, PacketPtr pkt)
 {
+    DPRINTF(PageTableWalker, "Send Tining\n");
     WalkerSenderState* walker_state = new WalkerSenderState(sendingState);
     pkt->pushSenderState(walker_state);
     if (port.sendTimingReq(pkt)) {
+        DPRINTF(PageTableWalker, "Send Timing True\n");
         return true;
     } else {
         // undo the adding of the sender state and delete it, as we
@@ -256,8 +257,9 @@ Walker::startWalkWrapper()
         }
     }
     if (currState && !currState->wasStarted()) {
-        if (!e || fault != NoFault)
+        if (!e || fault != NoFault) {
             currState->startWalk();
+        }
         else
             schedule(startWalkWrapperEvent, clockEdge(Cycles(1)));
     }
@@ -316,22 +318,132 @@ Walker::WalkerState::startFunctional(Addr &addr, unsigned &logBytes)
     return fault;
 }
 
+bool
+Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
+{
+    // Simulates a gate-oriented comparision of two PTEs to detect if they are physically 
+    // contagious
+    if (first_pte.perm == second_pte.perm && first_pte)
+    {
+        Addr first_ppn = (level == 1) ? first_pte.ppn1: first_pte.ppn2;
+        Addr second_ppn = (level == 1) ? second_pte.ppn1: second_pte.ppn2;
+        return second_ppn - first_ppn == 1;
+    }
+    return false;
+}
+
+int8_t
+Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
+{
+    /*
+    Creates a contagious indicator for each PTE in the cacheline
+    It does so in reference to the previous entry
+
+    The assumption here is that in hardware you would create a defualt entry and mask it
+    with the value from the index to "fix" it to the required entry in a bitwize operation
+    */
+    union bitwize_casting {
+        uint8_t asInt;
+        bool asBits[8];
+    };
+    bitwize_casting readInfoCoalesingEntry;
+    readInfoCoalesingEntry.asInt = 0;
+    for (int i = 1; i < 8; i++)
+    {
+        PTESv39 first_pte = readInfo->getOffsetLE<uint64_t>(i-1);
+        PTESv39 second_pte = readInfo->getOffsetLE<uint64_t>(i);
+        readInfoCoalesingEntry.asInt += this->isContaigous(level, first_pte, second_pte) ? (1 << i) : 0;
+    }
+
+    uint64_t readIndex = readInfo->getIdx();
+    // Backward coalesing detection
+    if (readIndex > 0) {
+        for (int i = readIndex - 1; i > 0; i--)
+        {
+            // Apply backgwards, if it was already 0 it doesn't matter but only contaigous 1 would work
+            readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i+1];
+        }
+    }
+    // Forward coalesing detection
+    if (readIndex < 7) {
+        for (int i = readIndex + 1; i <= 7; i++)
+        {
+            readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i-1];
+        }
+    }
+    //std::bitset<8> x = readInfoCoalesingEntry.asInt;
+    DPRINTF(PageTableWalker, "Coalesing Entry is: %d\n", readInfoCoalesingEntry.asInt);
+
+    return readInfoCoalesingEntry.asInt;
+}
+
+void
+Walker::detectCoalesing(PacketPtr &read_pte, int level)
+{
+    // This doesn't verify permissions which is also required... but let's see
+    uint64_t target_idx = read_pte->getIdx();
+    PTESv39 target_pte = read_pte->getOffsetLE<uint64_t>(target_idx);
+    uint64_t sze = 1;
+    Addr target_page_frame = target_pte.ppn;
+    if (level == 0)
+        return;
+    Addr target_ppn = (level == 1) ? target_pte.ppn1: target_pte.ppn2;
+    for (int i = target_idx-1; i > 0; i--)
+    {
+        PTESv39 curr_pte = read_pte->getOffsetLE<uint64_t>(i);
+        Addr curr_ppn = (level == 1) ? curr_pte.ppn1: curr_pte.ppn2;
+        if (target_ppn - curr_ppn == target_idx - i && target_idx != i && curr_pte.w == target_pte.w && curr_pte.x == target_pte.x)
+        {
+            DPRINTF(PageTableWalker, "Target[%d]: %#X[%#x]\tCurrent[%d], %#X[%#x]\n", target_idx, target_pte, target_ppn, i, curr_pte, curr_ppn);
+            sze+=1;
+        }
+        else
+        {
+            break;
+        }
+    }
+    uint64_t start_idx = target_idx - sze + 1;
+    DPRINTF(PageTableWalker, "Testing post prev Start: %d\n", start_idx);
+    for (int i = target_idx; i < 8; i ++)
+    {
+        PTESv39 curr_pte = read_pte->getOffsetLE<uint64_t>(i);
+        Addr curr_ppn = (level == 1) ? curr_pte.ppn1: curr_pte.ppn2;
+        if (target_ppn - curr_ppn == target_idx - i && target_idx != i && curr_pte.w == target_pte.w && curr_pte.x == target_pte.x)
+        {
+            DPRINTF(PageTableWalker, "N Target[%d]: %#X[%#x]\tCurrent[%d], %#X[%#x]\n", target_idx, target_pte, target_ppn, i, curr_pte, curr_ppn);
+            sze+=1;
+        }
+        else
+        {
+            break;
+        }
+    }
+    DPRINTF(PageTableWalker, "Testing post next sze: %d\n", sze);
+}
+
 Fault
 Walker::WalkerState::stepWalk(PacketPtr &write)
 {
     assert(state != Ready && state != Waiting);
     Fault fault = NoFault;
     write = NULL;
-    PTESv39 pte = read->getLE<uint64_t>();
+
+    PTESv39 pte = read->getOffsetLE<uint64_t>(read->getIdx());
     Addr nextRead = 0;
     bool doWrite = false;
     bool doTLBInsert = false;
     bool doEndWalk = false;
 
-    DPRINTF(PageTableWalker, "Got level%d PTE: %#x\n", level, pte);
 
+    DPRINTF(PageTableWalker, "[LEVEL%d] Buffer Start: %#x\tIndex: %d (%#x) -> PTE: %#x (r%dw%dv%d ppn %#x)\n", 
+        level, read->getAddr(), read->getIdx(), read->getAddr() + sizeof(PTESv39) * read->getIdx(), pte, pte.r, pte.w, pte.v, pte.ppn);
     // step 2:
     // Performing PMA/PMP checks on physical address of PTE
+
+    // Let's check coalesing here
+    DPRINTF(PageTableWalker, "Results:\n1[%#X] 2[%#X] 3[%#X] 4[%#X] \n5[%#X] 6[%#X] 7[%#X] 8[%#x]\n\tidx=%d\n",
+         read->getOffsetLE<PTESv39>(0).ppn, read->getOffsetLE<PTESv39>(1).ppn, read->getOffsetLE<PTESv39>(2).ppn, read->getOffsetLE<PTESv39>(3).ppn, read->getOffsetLE<PTESv39>(4).ppn, read->getOffsetLE<PTESv39>(5).ppn, read->getOffsetLE<PTESv39>(6).ppn, read->getOffsetLE<PTESv39>(7).ppn, read->getIdx());
+
 
     // Effective privilege mode for pmp checks for page table
     // walks is S mode according to specs
@@ -343,10 +455,17 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
     }
 
     if (fault == NoFault) {
+        // Here we need to detect a size... I think...
+        /*
+        Basically add logic for coalecing
+        */
+
+
+
         // step 3:
         if (!pte.v || (!pte.r && pte.w)) {
             doEndWalk = true;
-            DPRINTF(PageTableWalker, "PTE invalid, raising PF\n");
+            DPRINTF(PageTableWalker, "PTE invalid, raising PF %#x v%d r%d w%d\n", pte, pte.v, pte.r, pte.w);
             fault = pageFault(pte.v);
         }
         else {
@@ -404,6 +523,8 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                                  level, entry.vaddr);
 
                         // step 8
+
+
                         entry.logBytes = PageShift + (level * LEVEL_BITS);
                         entry.paddr = pte.ppn;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
@@ -464,6 +585,8 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
 
         if (doTLBInsert) {
             if (!functional) {
+                // walker->detectCoalesing(read, level);
+                int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
                 Addr vpn = getVPNFromVAddr(entry.vaddr, satp.mode);
                 walker->tlb->insert(vpn, entry);
             } else {
@@ -476,8 +599,11 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
     }
     else {
         //If we didn't return, we're setting up another read.
+        Addr nextReadOffst = nextRead % 64;
+        nextRead -= nextReadOffst;
+        Addr nextReadIdx = nextReadOffst / 8;
         RequestPtr request = std::make_shared<Request>(
-            nextRead, oldRead->getSize(), flags, walker->requestorId);
+            nextRead, oldRead->getSize(), flags, walker->requestorId, oldRead->req->getPayloadSize(), nextReadIdx);
 
         delete oldRead;
         oldRead = nullptr;
@@ -486,7 +612,7 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         read->allocate();
 
         DPRINTF(PageTableWalker,
-                "Loading level%d PTE from %#x\n", level, nextRead);
+                "Loading level%d PTE from %#x\nTEST: %#x\n", level, nextRead, read->getSize());
     }
 
     return fault;
@@ -512,18 +638,29 @@ Walker::WalkerState::setupWalk(Addr vaddr)
 
     DPRINTF(PageTableWalker, "Performing table walk for address %#x\n", vaddr);
     DPRINTF(PageTableWalker, "Loading level%d PTE from %#x\n", level, topAddr);
+    DPRINTF(PageTableWalker, "The table address is: %#x level%d idx: %#X\n", satp.ppn << PageShift, level, idx);
 
+    Addr offset = topAddr % 64;
+    Addr readStartAddr = topAddr - offset;
+    Addr offsetIdx = offset >> 3;
     state = Translate;
     nextState = Ready;
     entry.vaddr = vaddr;
     entry.asid = satp.asid;
 
     Request::Flags flags = Request::PHYSICAL;
-    RequestPtr request = std::make_shared<Request>(
-        topAddr, sizeof(PTESv39), flags, walker->requestorId);
+    // In thoery here the magic happens - I will modify it but it will break things (:)
+    // The actual thing should be a basic masking + getting multiples, we still need to reserve the innder index.
 
+    // BOOM : Changinbg the start fixed it - need to add some index... (to make it work again)
+    RequestPtr request = std::make_shared<Request>(
+        readStartAddr, sizeof(PTESv39) * 8, flags, walker->requestorId, sizeof(PTESv39), offsetIdx);
+
+
+    // This fails somehow :(
     read = new Packet(request, MemCmd::ReadReq);
     read->allocate();
+    DPRINTF(PageTableWalker, "Test allocation size: %#x\n", read->getSize());
 }
 
 bool
@@ -595,7 +732,6 @@ Walker::WalkerState::recvPacket(PacketPtr pkt)
         }
         return true;
     }
-
     return false;
 }
 

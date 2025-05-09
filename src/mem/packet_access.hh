@@ -57,6 +57,16 @@ Packet::getRaw() const
 }
 
 template <typename T>
+inline T
+Packet::getRawOffset(Addr offset) const
+{
+    assert(flags.isSet(STATIC_DATA|DYNAMIC_DATA));
+    assert((offset + 1) * sizeof(T) <= size);
+    Addr data_offset = offset * sizeof(T);
+    return *(T*)(data + data_offset);
+}
+
+template <typename T>
 inline void
 Packet::setRaw(T v)
 {
@@ -79,6 +89,14 @@ Packet::getLE() const
 {
     return letoh(getRaw<T>());
 }
+
+template <typename T>
+inline T
+Packet::getOffsetLE(Addr offset) const
+{
+  return letoh(getRawOffset<T>(offset));
+}
+
 
 template <typename T>
 inline T

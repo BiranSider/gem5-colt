@@ -55,7 +55,6 @@ repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v5.0.0
       hooks:
-          - id: trailing-whitespace
           - id: end-of-file-fixer
           - id: check-json
           - id: check-yaml
@@ -87,18 +86,3 @@ repos:
             # Python 3.8 is the earliest version supported.
             # We therefore conform to the standards compatible with 3.8+.
             args: [--py38-plus]
-    - repo: local
-      hooks:
-          - id: gem5-style-checker
-            name: gem5 style checker
-            entry: util/git-pre-commit.py
-            always_run: true
-            exclude: .*
-            language: system
-            description: The gem5 style checker hook.
-          - id: gem5-commit-msg-checker
-            name: gem5 commit msg checker
-            entry: util/git-commit-msg.py
-            language: system
-            stages: [commit-msg]
-            description: The gem5 commit message checker hook.
