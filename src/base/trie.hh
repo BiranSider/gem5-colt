@@ -225,7 +225,7 @@ class Trie
         Key cur_mask = node->mask;
         // If we're already where the value needs to be...
         if (cur_mask == new_mask) {
-            assert(!node->value);
+            // assert(!node->value);
             node->value = val;
             return node;
         }

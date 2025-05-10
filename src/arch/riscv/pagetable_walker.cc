@@ -328,6 +328,7 @@ Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
     {
         Addr first_ppn = (level == 1) ? first_pte.ppn1: first_pte.ppn2;
         Addr second_ppn = (level == 1) ? second_pte.ppn1: second_pte.ppn2;
+        // XOR than compare for example...
         return second_ppn - first_ppn == 1;
     }
     return false;
@@ -358,63 +359,84 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
             this->isContaigous(level, first_pte, second_pte) ? (1 << i) : 0;
     }
 
-    uint64_t readIndex = readInfo->getIdx();
+    DPRINTF(PageTableWalker, "Found cacheline at %#x with the following coalesing entry: %d\n",
+                readInfo->getAddr(), readInfoCoalesingEntry.asInt);
+    Addr readIndex = readInfo->getIdx();
+    uint8_t indexedCoalesingInfo = (uint8_t)(1 << readIndex);
     // Backward coalesing detection
+
     if (readIndex > 0) {
-        for (int i = readIndex - 1; i > 0; i--)
-        {
-            // if it was already 0 it doesn't matter but only contaigous 1 would work
-            readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i+1];
+        int index = readIndex - 1;
+        while (index >= 0 && readInfoCoalesingEntry.asInt & (1 << (index + 1))) {
+            indexedCoalesingInfo += (1 << index);
+            index--;
         }
+        // for (int i = 1; i <= readIndex; i++)
+        // {
+        //     int effectIndex = readIndex - i;
+        //     if (indexedCoalesingInfo & (1 << (effectIndex + 1)) == (1 << (effectIndex + 1)) && \
+        //         readInfoCoalesingEntry.asInt & (1 << (effectIndex + 1)) == (1 << (effectIndex + 1)))
+        //     {
+        //         indexedCoalesingInfo += (1 << effectIndex);
+        //     }
+        // }
     }
     // Forward coalesing detection
     if (readIndex < 7) {
-        for (int i = readIndex + 1; i <= 7; i++)
-        {
-            readInfoCoalesingEntry.asBits[i] &= readInfoCoalesingEntry.asBits[i-1];
+        // In hardware it would be a bitwise operation on the bits between the reuired index and the current
+        int index = readIndex + 1;
+        while (index <= 7 && readInfoCoalesingEntry.asInt & (1 << index)) {
+            indexedCoalesingInfo += (1 << index);
+            index++;
         }
     }
-    // No matter what - validate the intended index itself.
-    readInfoCoalesingEntry.asBits[readIndex] = 1;
-
     // At this point this contains the is valid in comparision to the index
-    DPRINTF(PageTableWalker, "Coalesing Entry is: %d\n", readInfoCoalesingEntry.asInt);
-    return readInfoCoalesingEntry.asInt;
+    DPRINTF(PageTableWalker, "The masked coalesing entry for %#x (%d) is: %d\n", 
+        readInfo->getAddr(), readIndex, indexedCoalesingInfo);
+    return indexedCoalesingInfo;
 }
 
-PTESv39
-Walker::getBaseCoalesingEntry(PacketPtr &readInfo, uint8_t coalesingData)
+Addr
+Walker::getBaseCoalesingEntryIndex(PacketPtr &readInfo, uint8_t coalesingData)
 {
     bitwize_casting readInfoCoalesingEntry;
     readInfoCoalesingEntry.asInt = coalesingData;
     bitwize_casting lowestIndex;
 
-    for (int i=0; i < 7; i++) {
+    // In reality - the indexes are in reverse when looked at as bits
+    for (int i=7; i > 0; i--) {
         // We only want to preserve the lowest on bit for reference
         // The logic is Bi & (Bi ^ Bi+1) 
         /*
-        Bi  |   Bi+1    |   Res
-        0   |   0       |   0
-        1   |   0       |   1
-        0   |   1       |   0
-        1   |   1       |   0
+        |   Bi  |  Bi+1 |  Res  |
+        |   0   |   0   |   0   |
+        |   1   |   0   |   1   |
+        |   0   |   1   |   0   |
+        |   1   |   1   |   0   |
         One can assume an ADC would be used prior to a MUX that would be used
         to choose the base PTE
+
+        NOTE: in reality the indexes are exactly the opposite which is why it is i-1, i
         */
        bool bi = readInfoCoalesingEntry.asBits[i];
-       bool bi1 = readInfoCoalesingEntry.asBits[i+1];
-       lowestIndex.asBits[i] = bi & (bi ^ bi1);
+       bool bi1 = readInfoCoalesingEntry.asBits[i-1];
+       lowestIndex.asBits[i-1] = bi & (bi ^ bi1);
     }
+    DPRINTF(PageTableWalker, "The lowest index identifier for %#x is %#x\n",
+            readInfo->getAddr(), lowestIndex.asInt);
+
     // Default to it because it's the case where None of these will be on
-    int base_entry_index = 7;
+    int base_entry_index = 0;
     // Assume ADC logic
-    for (int i=0; i < 7; i++) {
-        if (lowestIndex.asBits[i]) {
+    for (int i=0; i <= 7; i++) {
+        if (lowestIndex.asInt & (1 << i) == (1 << i)) {
             base_entry_index = i;
             break;
         } 
     }
-    return readInfo->getOffsetLE<uint64_t>(base_entry_index);
+    DPRINTF(PageTableWalker, "The base entry index of %#x is:\t%d\n",
+            readInfo->getAddr(), base_entry_index);
+    return base_entry_index;
 }
 
 // uint64_t
@@ -533,13 +555,16 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                         // Now that we found the PTE - we want to perform coalesing logic
                         // walker->detectCoalesing(read, level);
                         int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
-                        PTESv39 basePte = walker->getBaseCoalesingEntry(read, coalesingData);
+                        Addr baseIndex = walker->getBaseCoalesingEntryIndex(read, coalesingData);
+                        PTESv39 basePte = read->getOffsetLE<uint64_t>(baseIndex);
+                        // TODO: The size is still wrong bbut we're getting there... only for pre...
                         entry.coalesingData = coalesingData;
+
+                        DPRINTF(PageTableWalker, "Obtained: %#x (original %#x)\n", basePte.ppn << PageShift, pte.ppn << PageShift);
                         // This isn't correct it's temporary :(
 
-                        uint32_t numberOfPages = pte.ppn - basePte.ppn;
-                        // step 8
-                        entry.logBytes = numberOfPages + PageShift + (level * LEVEL_BITS);
+                        // Add bytes as we represent coalesing.... so 3 extra
+                        entry.logBytes = 3 + PageShift + (level * LEVEL_BITS);
                         entry.paddr = basePte.ppn;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
                         entry.pte = basePte;
@@ -600,7 +625,8 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
         if (doTLBInsert) {
             if (!functional) {
                 
-                
+                DPRINTF(PageTableWalker, "Writing entry to TLB: %#x -> %#x (%d)\n",
+                    entry.vaddr, entry.paddr << PageShift, entry.size());
                 // Fill the entry! 
 
                 Addr vpn = getVPNFromVAddr(entry.vaddr, satp.mode);

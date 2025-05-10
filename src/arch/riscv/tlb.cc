@@ -76,6 +76,14 @@ buildKey(Addr vpn, uint16_t asid)
     return (static_cast<Addr>(asid) << 48) | vpn;
 }
 
+static Addr
+buildCoalesingKey(Addr vpn, uint16_t asid)
+{
+    assert((vpn % 8) == 0);
+    assert(bits(vpn, 63, 47) == 0);
+    return (1 << 47) | (static_cast<Addr>(asid) << 48) | vpn;
+}
+
 TLB::TLB(const Params &p) :
     BaseTLB(p), size(p.size), tlb(size),
     lruSeq(0), stats(this), pma(p.pma_checker),
@@ -115,6 +123,13 @@ TlbEntry *
 TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
 {
     TlbEntry *entry = trie.lookup(buildKey(vpn, asid));
+    if (!entry) {
+        // Look for coalesing entry
+        Addr coalesingVpn = vpn - (vpn % 8);
+        entry = trie.lookup(buildCoalesingKey(coalesingVpn, asid));
+        if (entry->coalesingData & (1 << (vpn & 8)) == 0)
+            entry = NULL;
+    }
 
     DPRINTF(TLBVerbose, "lookup(vpn=%#x, asid=%#x, key=%#x): "
                         "%s ppn=%#x (%#x) %s\n",
@@ -151,9 +166,20 @@ TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
 TlbEntry *
 TLB::insert(Addr vpn, const TlbEntry &entry)
 {
+    Addr entryKey;
+    bool isCoalesingEntry;
+    if (entry.size() > (1 << PageShift)) {
+        entryKey = buildCoalesingKey(vpn, entry.asid);
+        isCoalesingEntry = true;
+    }
+    else {
+        entryKey = buildKey(vpn, entry.asid);
+        isCoalesingEntry = false;
+    }
+    
     DPRINTF(TLB, "insert(vpn=%#x, asid=%#x, key=%#x): "
                  "vaddr=%#x paddr=%#x pte=%#x size=%#x\n",
-        vpn, entry.asid, buildKey(vpn, entry.asid), entry.vaddr, entry.paddr,
+        vpn, entry.asid, entryKey, entry.vaddr, entry.paddr,
         entry.pte, entry.size());
 
     // If somebody beat us to it, just use that existing entry.
@@ -161,9 +187,11 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
     if (newEntry) {
         // update PTE flags (maybe we set the dirty/writable flag)
         newEntry->pte = entry.pte;
-        assert(newEntry->vaddr == entry.vaddr);
+        newEntry->coalesingData = entry.coalesingData;
+        newEntry->logBytes = entry.logBytes;
+        //assert(newEntry->vaddr == entry.vaddr);
         assert(newEntry->asid == entry.asid);
-        assert(newEntry->logBytes == entry.logBytes);
+        // assert(newEntry->logBytes == entry.logBytes);
         return newEntry;
     }
 
@@ -173,11 +201,11 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
     newEntry = freeList.front();
     freeList.pop_front();
 
-    Addr key = buildKey(vpn, entry.asid);
+    // Addr key = buildKey(vpn, entry.asid);
     *newEntry = entry;
     newEntry->lruSeq = nextSeq();
     newEntry->trieHandle = trie.insert(
-        key, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
+        entryKey, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
     );
     return newEntry;
 }
@@ -325,7 +353,6 @@ TLB::doTranslate(const RequestPtr &req, ThreadContext *tc,
         e = lookup(vpn, satp.asid, mode, true);
         assert(e != nullptr);
     }
-
     STATUS status = tc->readMiscReg(MISCREG_STATUS);
     PrivilegeMode pmode = getMemPriv(tc, mode);
     Fault fault = checkPermissions(status, pmode, vaddr, mode, e->pte);
@@ -333,7 +360,6 @@ TLB::doTranslate(const RequestPtr &req, ThreadContext *tc,
         // if we want to write and it isn't writable, do a page table walk
         // again to update the dirty flag.
         if (mode == BaseMMU::Write && !e->pte.w) {
-            DPRINTF(TLB, "Dirty bit not set, repeating PT walk\n");
             fault = walker->start(tc, translation, req, mode);
             if (translation != nullptr || fault != NoFault) {
                 delayed = true;

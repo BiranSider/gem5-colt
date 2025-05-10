@@ -186,7 +186,7 @@ namespace RiscvISA
 
         int8_t indexedCoalesingEntryInformation(int level, PacketPtr &readInfo);
 
-        PTESv39 getBaseCoalesingEntry(PacketPtr &readInfo, uint8_t coalesingData);
+        Addr getBaseCoalesingEntryIndex(PacketPtr &readInfo, uint8_t coalesingData);
 
         bool isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte);
 
