@@ -371,15 +371,6 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
             indexedCoalesingInfo += (1 << index);
             index--;
         }
-        // for (int i = 1; i <= readIndex; i++)
-        // {
-        //     int effectIndex = readIndex - i;
-        //     if (indexedCoalesingInfo & (1 << (effectIndex + 1)) == (1 << (effectIndex + 1)) && \
-        //         readInfoCoalesingEntry.asInt & (1 << (effectIndex + 1)) == (1 << (effectIndex + 1)))
-        //     {
-        //         indexedCoalesingInfo += (1 << effectIndex);
-        //     }
-        // }
     }
     // Forward coalesing detection
     if (readIndex < 7) {
@@ -438,18 +429,6 @@ Walker::getBaseCoalesingEntryIndex(PacketPtr &readInfo, uint8_t coalesingData)
             readInfo->getAddr(), base_entry_index);
     return base_entry_index;
 }
-
-// uint64_t
-// Walker::getCoalesingLength(uint8_t coalesingData, ) {
-//     /*
-//     The final step in this thing is now that we map to a base PTE with a new size...
-
-//     Understand how to:
-//         1. TAG the data correctly (since it encompasses more pages)
-//         2. Peresent the length information to through the TLB...
-//     */
-// }
-
 
 Fault
 Walker::WalkerState::stepWalk(PacketPtr &write)
@@ -564,7 +543,13 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                         // This isn't correct it's temporary :(
 
                         // Add bytes as we represent coalesing.... so 3 extra
-                        entry.logBytes = 3 + PageShift + (level * LEVEL_BITS);
+                        int extraCoalesingByes = 0;
+                        DPRINTF(PageTableWalker, "Coalesing Entry is %#x idx %d\n", coalesingData, read->getIdx());
+                        if ((coalesingData - (1 << read->getIdx())) != 0) {
+                            extraCoalesingByes = 3;
+                            entry.isCoalesed = true;
+                        }
+                        entry.logBytes = PageShift + (level * LEVEL_BITS) + extraCoalesingByes;
                         entry.paddr = basePte.ppn;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
                         entry.pte = basePte;

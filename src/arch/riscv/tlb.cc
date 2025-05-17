@@ -81,7 +81,7 @@ buildCoalesingKey(Addr vpn, uint16_t asid)
 {
     assert((vpn % 8) == 0);
     assert(bits(vpn, 63, 47) == 0);
-    return (1 << 47) | (static_cast<Addr>(asid) << 48) | vpn;
+    return static_cast<Addr>(0x800000000000) | (static_cast<Addr>(asid) << 48) | vpn;
 }
 
 TLB::TLB(const Params &p) :
@@ -122,20 +122,28 @@ TLB::evictLRU()
 TlbEntry *
 TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
 {
-    TlbEntry *entry = trie.lookup(buildKey(vpn, asid));
+    bool coalesed = false;
+    Addr key = buildKey(vpn, asid);
+    TlbEntry *entry = trie.lookup(key);
     if (!entry) {
         // Look for coalesing entry
         Addr coalesingVpn = vpn - (vpn % 8);
-        entry = trie.lookup(buildCoalesingKey(coalesingVpn, asid));
-        if (entry->coalesingData & (1 << (vpn & 8)) == 0)
-            entry = NULL;
+        key = buildCoalesingKey(coalesingVpn, asid);
+        entry = trie.lookup(key);
+        if (entry && (entry->coalesingData & (1 << (vpn & 8)) == 0))
+            entry = nullptr;
+        if (entry)
+        {
+            DPRINTF(TLBVerbose, "Found %#x through coalesing, index: %d (%#x)\n", vpn, vpn & 8, entry-> coalesingData);
+            coalesed = true;
+        }
     }
 
     DPRINTF(TLBVerbose, "lookup(vpn=%#x, asid=%#x, key=%#x): "
-                        "%s ppn=%#x (%#x) %s\n",
-            vpn, asid, buildKey(vpn, asid), entry ? "hit" : "miss",
+                        "%s ppn=%#x (%#x) %s %s\n",
+            vpn, asid, key, entry ? "hit" : "miss",
             entry ? entry->paddr : 0, entry ? entry->size() : 0,
-            hidden ? "hidden" : "");
+            hidden ? "hidden" : "", coalesed ? "coalsesed" : "");
 
     if (!hidden) {
         if (entry)
@@ -167,20 +175,19 @@ TlbEntry *
 TLB::insert(Addr vpn, const TlbEntry &entry)
 {
     Addr entryKey;
-    bool isCoalesingEntry;
-    if (entry.size() > (1 << PageShift)) {
+    bool isCoalesingEntry = entry.isCoalesed;
+    if (isCoalesingEntry) {
         entryKey = buildCoalesingKey(vpn, entry.asid);
-        isCoalesingEntry = true;
+        DPRINTF(TLB, "Created coalesing key: %#x\n", entryKey);
     }
     else {
         entryKey = buildKey(vpn, entry.asid);
-        isCoalesingEntry = false;
     }
     
     DPRINTF(TLB, "insert(vpn=%#x, asid=%#x, key=%#x): "
-                 "vaddr=%#x paddr=%#x pte=%#x size=%#x\n",
+                 "vaddr=%#x paddr=%#x pte=%#x size=%#x %s\n",
         vpn, entry.asid, entryKey, entry.vaddr, entry.paddr,
-        entry.pte, entry.size());
+        entry.pte, entry.size(), isCoalesingEntry ? "C": "");
 
     // If somebody beat us to it, just use that existing entry.
     TlbEntry *newEntry = lookup(vpn, entry.asid, BaseMMU::Read, true);
@@ -189,6 +196,7 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
         newEntry->pte = entry.pte;
         newEntry->coalesingData = entry.coalesingData;
         newEntry->logBytes = entry.logBytes;
+        newEntry->isCoalesed = entry.isCoalesed;
         //assert(newEntry->vaddr == entry.vaddr);
         assert(newEntry->asid == entry.asid);
         // assert(newEntry->logBytes == entry.logBytes);
@@ -369,8 +377,11 @@ TLB::doTranslate(const RequestPtr &req, ThreadContext *tc,
         if (fault != NoFault)
             return fault;
     }
-
-    Addr paddr = e->paddr << PageShift | (vaddr & mask(e->logBytes));
+    // <--------
+    Addr directShift = e->isCoalesed ? vpn % 8: 0;
+    DPRINTF(TLBVerbose, "start: %#x direct shift calc: %d, offset: %x, direct shift from addr: %d\n",
+    e->paddr << PageShift, directShift, vaddr & mask(e->logBytes), vaddr & mask(e->logBytes) >> (e->logBytes - 3));
+    Addr paddr = (e->paddr) << PageShift | (vaddr & mask(e->logBytes));
     DPRINTF(TLBVerbose, "translate(vaddr=%#x, vpn=%#x, asid=%#x): %#x\n",
             vaddr, vpn, satp.asid, paddr);
     req->setPaddr(paddr);

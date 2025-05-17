@@ -100,6 +100,8 @@ struct TlbEntry : public Serializable
     // Contains information about which pages inside are valid
     uint8_t coalesingData;
 
+    bool isCoalesed;
+
     uint16_t asid;
 
     PTESv39 pte;
@@ -110,7 +112,7 @@ struct TlbEntry : public Serializable
     uint64_t lruSeq;
 
     TlbEntry()
-        : paddr(0), vaddr(0), logBytes(0), pte(), lruSeq(0), coalesingData(0)
+        : paddr(0), vaddr(0), logBytes(0), pte(), lruSeq(0), coalesingData(0), isCoalesed(false)
     {}
 
     // Return the page size in bytes

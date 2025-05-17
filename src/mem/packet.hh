@@ -396,6 +396,9 @@ class Packet : public Printable, public Extensible<Packet>
     /// The size of the request or transfer.
     unsigned size;
 
+    /// The size of the payloads within the request
+    unsigned payloadSize;
+
     /**
      * Track the bytes found that satisfy a functional read.
      */
@@ -816,6 +819,12 @@ class Packet : public Printable, public Extensible<Packet>
 
     unsigned getSize() const  { assert(flags.isSet(VALID_SIZE)); return size; }
 
+    unsigned getPayloadSize() const { 
+        if (payloadSize != 0) 
+            return payloadSize;
+        return getSize();
+    }
+
     /**
      * Get address range to which this packet belongs.
      *
@@ -911,10 +920,10 @@ class Packet : public Printable, public Extensible<Packet>
         }
         if (req->hasSize()) {
             size = req->getSize();
-            // if (req->getPayloadSize() == 0)
-            //     size = req->getSize();
-            // else
-            //     size = req->getPayloadSize();
+            if (req->getPayloadSize() == 0)
+                payloadSize = req->getSize();
+            else
+                payloadSize = req->getPayloadSize();
             flags.set(VALID_SIZE);
         }
     }

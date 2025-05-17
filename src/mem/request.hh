@@ -493,7 +493,7 @@ class Request : public Extensible<Request>
      * just physical address, size, flags, and timestamp (to curTick()).
      * These fields are adequate to perform a request.
      */
-    Request(Addr paddr, unsigned size, Flags flags, RequestorID id, 
+    Request(Addr paddr, unsigned size, Flags flags, RequestorID id,
         unsigned payload_size = 0, Addr offset=0) :
         _paddr(paddr), _size(size), _requestorId(id), _time(curTick())
     {
