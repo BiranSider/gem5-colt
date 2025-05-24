@@ -334,11 +334,6 @@ Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
     return false;
 }
 
-union bitwize_casting {
-    uint8_t asInt;
-    bool asBits[8];
-};
-
 int8_t
 Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
 {
@@ -348,26 +343,26 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
     The assumption here is that in hardware you would create a defualt entry and mask it
     with the value from the index to "fix" it to the required entry in a bitwize operation
     */
-    bitwize_casting readInfoCoalesingEntry;
+    uint8_t readInfoCoalesingEntry;
     // The first one is the same as itself (reference)
-    readInfoCoalesingEntry.asInt = 1;
+    readInfoCoalesingEntry = 1;
     for (int i = 1; i < 8; i++)
     {
         PTESv39 first_pte = readInfo->getOffsetLE<uint64_t>(i-1);
         PTESv39 second_pte = readInfo->getOffsetLE<uint64_t>(i);
-        readInfoCoalesingEntry.asInt += 
+        readInfoCoalesingEntry += 
             this->isContaigous(level, first_pte, second_pte) ? (1 << i) : 0;
     }
 
     DPRINTF(PageTableWalker, "Found cacheline at %#x with the following coalesing entry: %d\n",
-                readInfo->getAddr(), readInfoCoalesingEntry.asInt);
+                readInfo->getAddr(), readInfoCoalesingEntry);
     Addr readIndex = readInfo->getIdx();
     uint8_t indexedCoalesingInfo = (uint8_t)(1 << readIndex);
     // Backward coalesing detection
 
     if (readIndex > 0) {
         int index = readIndex - 1;
-        while (index >= 0 && readInfoCoalesingEntry.asInt & (1 << (index + 1))) {
+        while (index >= 0 && readInfoCoalesingEntry & (1 << (index + 1))) {
             indexedCoalesingInfo += (1 << index);
             index--;
         }
@@ -376,7 +371,7 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
     if (readIndex < 7) {
         // In hardware it would be a bitwise operation on the bits between the reuired index and the current
         int index = readIndex + 1;
-        while (index <= 7 && readInfoCoalesingEntry.asInt & (1 << index)) {
+        while (index <= 7 && readInfoCoalesingEntry & (1 << index)) {
             indexedCoalesingInfo += (1 << index);
             index++;
         }
@@ -390,37 +385,39 @@ Walker::indexedCoalesingEntryInformation(int level, PacketPtr &readInfo)
 Addr
 Walker::getBaseCoalesingEntryIndex(PacketPtr &readInfo, uint8_t coalesingData)
 {
-    bitwize_casting readInfoCoalesingEntry;
-    readInfoCoalesingEntry.asInt = coalesingData;
-    bitwize_casting lowestIndex;
-
-    // In reality - the indexes are in reverse when looked at as bits
-    for (int i=7; i > 0; i--) {
+    uint8_t lowestIndex = 0;
+    uint8_t bi, bi1;
+    // We want to preserve `1` if the lowest entry is valid
+    bi1 = 0;
+    for (int i = 0; i <= 7; i++) {
         // We only want to preserve the lowest on bit for reference
         // The logic is Bi & (Bi ^ Bi+1) 
         /*
-        |   Bi  |  Bi+1 |  Res  |
+        |   Bi  |  Bi-1 |  Res  |
         |   0   |   0   |   0   |
         |   1   |   0   |   1   |
         |   0   |   1   |   0   |
         |   1   |   1   |   0   |
         One can assume an ADC would be used prior to a MUX that would be used
-        to choose the base PTE
-
-        NOTE: in reality the indexes are exactly the opposite which is why it is i-1, i
+        to choose the base PTE or a or to ands which would make only 1 bit the viable
+        option
         */
-       bool bi = readInfoCoalesingEntry.asBits[i];
-       bool bi1 = readInfoCoalesingEntry.asBits[i-1];
-       lowestIndex.asBits[i-1] = bi & (bi ^ bi1);
+        bi = (coalesingData >> i) & 1;
+        lowestIndex += ((bi & (bi ^ bi1)) << i);
+        DPRINTF(PageTableWalker, "#%d [%d] & ([%d] ^ [%d]) = [%d] & [%d] -> %d\n",
+                i, bi, bi, bi1, bi, bi ^ bi1, lowestIndex);
+        bi1 = bi;
     }
-    DPRINTF(PageTableWalker, "The lowest index identifier for %#x is %#x\n",
-            readInfo->getAddr(), lowestIndex.asInt);
+    DPRINTF(PageTableWalker, "The lowest index identifier for %#x is %d\n",
+            readInfo->getAddr(), lowestIndex);
 
     // Default to it because it's the case where None of these will be on
     int base_entry_index = 0;
     // Assume ADC logic
     for (int i=0; i <= 7; i++) {
-        if (lowestIndex.asInt & (1 << i) == (1 << i)) {
+        DPRINTF(PageTableWalker, "#%d (%#x == %#x)\n",
+            i, lowestIndex & (1 << i), (1 << i));
+        if ((lowestIndex & (1 << i)) != 0) {
             base_entry_index = i;
             break;
         } 
@@ -545,12 +542,14 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                         // Add bytes as we represent coalesing.... so 3 extra
                         int extraCoalesingByes = 0;
                         DPRINTF(PageTableWalker, "Coalesing Entry is %#x idx %d\n", coalesingData, read->getIdx());
+                        entry.paddr = basePte.ppn;
                         if ((coalesingData - (1 << read->getIdx())) != 0) {
+                            DPRINTF(PageTableWalker, "We got %#x for %#x\n", coalesingData, (1 << read->getIdx()));
                             extraCoalesingByes = 3;
                             entry.isCoalesed = true;
+                            entry.paddr = basePte.ppn & ~((1 << 3) - 1);
                         }
                         entry.logBytes = PageShift + (level * LEVEL_BITS) + extraCoalesingByes;
-                        entry.paddr = basePte.ppn;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
                         entry.pte = basePte;
                         // put it non-writable into the TLB to detect
@@ -732,6 +731,7 @@ Walker::WalkerState::recvPacket(PacketPtr pkt)
              */
             Addr vaddr = req->getVaddr();
             vaddr = Addr(sext<VADDR_BITS>(vaddr));
+            DPRINTF(PageTableWalker, "Calling hiddenTranslateWithTLB with %#x", vaddr);
             Addr paddr = walker->tlb->hiddenTranslateWithTLB(vaddr, satp.asid,
                                                              satp.mode, mode);
             req->setPaddr(paddr);

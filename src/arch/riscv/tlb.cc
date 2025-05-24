@@ -130,12 +130,19 @@ TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
         Addr coalesingVpn = vpn - (vpn % 8);
         key = buildCoalesingKey(coalesingVpn, asid);
         entry = trie.lookup(key);
-        if (entry && (entry->coalesingData & (1 << (vpn & 8)) == 0))
-            entry = nullptr;
-        if (entry)
-        {
-            DPRINTF(TLBVerbose, "Found %#x through coalesing, index: %d (%#x)\n", vpn, vpn & 8, entry-> coalesingData);
-            coalesed = true;
+        
+        if (entry) {
+            Addr coalesingIndex = (vpn >> (entry->logBytes - 3 - PageShift)) % 8;
+            DPRINTF(TLB, "Found %#x through coalesing key %#x (idx %d of %#x)\n",
+                vpn, key, coalesingIndex, entry->coalesingData);
+            if ((entry->coalesingData & (1 << coalesingIndex)) == 0) {
+                entry = nullptr;
+                DPRINTF(TLB, "Entry isn't valid for index %d\n", coalesingIndex);
+            }
+            else {
+                DPRINTF(TLB, "Entry valid for index %d\n", coalesingIndex);
+                coalesed = true;
+            }
         }
     }
 
@@ -176,6 +183,7 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
 {
     Addr entryKey;
     bool isCoalesingEntry = entry.isCoalesed;
+    // If the inserted entry is a coalesed one, form a key with indicator
     if (isCoalesingEntry) {
         entryKey = buildCoalesingKey(vpn, entry.asid);
         DPRINTF(TLB, "Created coalesing key: %#x\n", entryKey);
@@ -191,16 +199,44 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
 
     // If somebody beat us to it, just use that existing entry.
     TlbEntry *newEntry = lookup(vpn, entry.asid, BaseMMU::Read, true);
+    DPRINTF(TLB, "Old Entry %d\n", newEntry ? newEntry->pte.ppn: 0);
     if (newEntry) {
-        // update PTE flags (maybe we set the dirty/writable flag)
-        newEntry->pte = entry.pte;
-        newEntry->coalesingData = entry.coalesingData;
-        newEntry->logBytes = entry.logBytes;
-        newEntry->isCoalesed = entry.isCoalesed;
-        //assert(newEntry->vaddr == entry.vaddr);
-        assert(newEntry->asid == entry.asid);
-        // assert(newEntry->logBytes == entry.logBytes);
-        return newEntry;
+        if (newEntry->isCoalesed == entry.isCoalesed)
+        {
+            DPRINTF(TLB, "Replacing TLB entry %#x (%d) -> %#x (%d)\n", 
+                newEntry->pte, newEntry->coalesingData, entry.pte, entry.coalesingData);
+            // update PTE flags (maybe we set the dirty/writable flag)
+            newEntry->pte = entry.pte;
+            newEntry->coalesingData = entry.coalesingData;
+            newEntry->logBytes = entry.logBytes;
+            newEntry->isCoalesed = entry.isCoalesed;
+            assert(newEntry->vaddr == entry.vaddr);
+            assert(newEntry->asid == entry.asid);
+            assert(newEntry->logBytes == entry.logBytes);
+            return newEntry;
+        }
+        else if (entry.isCoalesed)
+        {
+            DPRINTF(TLB, "Replacing TLB entry to a coalesed one %#x -> %#x (%d)\n", 
+                newEntry->pte, entry.pte, entry.coalesingData);
+            trie.remove(buildKey(vpn, entry.asid));
+            newEntry->pte = entry.pte;
+            newEntry->coalesingData = entry.coalesingData;
+            newEntry->logBytes = entry.logBytes;
+            newEntry->isCoalesed = entry.isCoalesed;
+            newEntry->logBytes = entry.logBytes;
+            trie.insert(
+                entryKey, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
+            );
+            return newEntry;
+        }
+        else // The other entry is the coalsed one but it shouln't include this address
+        {
+            // Remove the VPN as it no longer seems valid and form a new mapping for this entry
+            DPRINTF(TLB, "Removing coalesing of a value  %#x (%d) -> (%d)\n", 
+                newEntry->pte, newEntry->coalesingData, newEntry->coalesingData - entry.coalesingData);
+            newEntry->coalesingData -= entry.coalesingData;
+        }
     }
 
     if (freeList.empty())
@@ -215,6 +251,8 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
     newEntry->trieHandle = trie.insert(
         entryKey, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
     );
+    DPRINTF(TLB, "Inserted successfully at %#x\n", entryKey);
+    
     return newEntry;
 }
 
@@ -244,13 +282,20 @@ TLB::demapPage(Addr vaddr, uint64_t asid)
             Addr vpn = getVPNFromVAddr(vaddr, AddrXlateMode::SV39);
             TlbEntry *entry = lookup(vpn, asid, BaseMMU::Read, true);
             if (entry) {
-                remove(entry - tlb.data());
+                if (entry->isCoalesed && (entry->coalesingData != (1 << (vpn % 8))))
+                {
+                    entry->coalesingData -= (1 << (vpn & 8));
+                }
+                else
+                    remove(entry - tlb.data());
             }
         }
         else {
             for (size_t i = 0; i < size; i++) {
                 if (tlb[i].trieHandle) {
                     Addr mask = ~(tlb[i].size() - 1);
+                    DPRINTF(TLB, "Addr: %#x\tEntry-Vaddr:%#x\n",
+                    vaddr & mask, tlb[i].vaddr);
                     if ((vaddr == 0 || (vaddr & mask) == tlb[i].vaddr) &&
                         (asid == 0 || tlb[i].asid == asid))
                         remove(i);
@@ -336,7 +381,7 @@ TLB::hiddenTranslateWithTLB(Addr vaddr, uint16_t asid, Addr xmode,
 {
     TlbEntry *e = lookup(getVPNFromVAddr(vaddr, xmode), asid, mode, true);
     assert(e != nullptr);
-    return e->paddr << PageShift | (vaddr & mask(e->logBytes));
+    return (e->paddr << PageShift) + (vaddr & mask(e->logBytes));
 }
 
 Fault
@@ -379,11 +424,14 @@ TLB::doTranslate(const RequestPtr &req, ThreadContext *tc,
     }
     // <--------
     Addr directShift = e->isCoalesed ? vpn % 8: 0;
-    DPRINTF(TLBVerbose, "start: %#x direct shift calc: %d, offset: %x, direct shift from addr: %d\n",
+    DPRINTF(TLB, "start: %#x direct shift calc: %d, offset: %x, direct shift from addr: %d\n",
     e->paddr << PageShift, directShift, vaddr & mask(e->logBytes), vaddr & mask(e->logBytes) >> (e->logBytes - 3));
-    Addr paddr = (e->paddr) << PageShift | (vaddr & mask(e->logBytes));
-    DPRINTF(TLBVerbose, "translate(vaddr=%#x, vpn=%#x, asid=%#x): %#x\n",
-            vaddr, vpn, satp.asid, paddr);
+    /* In physical form - the more likely thing is that a logic would calculate the ppn
+    with the index and than generate a regular | ppn | offset | form, here it doesn't matter
+    as the same effect is generated */
+    Addr paddr = ((e->paddr) << PageShift) + (vaddr & mask(e->logBytes));
+    DPRINTF(TLBVerbose, "translate(vaddr=%#x, vpn=%#x, asid=%#x): %#x (%d)\n",
+            vaddr, vpn, satp.asid, paddr, e->logBytes);
     req->setPaddr(paddr);
 
     return NoFault;
@@ -516,7 +564,7 @@ TLB::translateFunctional(const RequestPtr &req, ThreadContext *tc,
                 return fault;
 
             Addr masked_addr = vaddr & mask(logBytes);
-            paddr |= masked_addr;
+            paddr += masked_addr;
         }
     }
     else {
@@ -534,7 +582,7 @@ TLB::translateFunctional(const RequestPtr &req, ThreadContext *tc,
         if (!pte)
             return std::make_shared<GenericPageTableFault>(req->getVaddr());
 
-        paddr = pte->paddr | process->pTable->pageOffset(vaddr);
+        paddr = pte->paddr + process->pTable->pageOffset(vaddr);
     }
 
     DPRINTF(TLB, "Translated (functional) %#x -> %#x.\n", vaddr, paddr);
