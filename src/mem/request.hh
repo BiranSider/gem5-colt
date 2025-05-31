@@ -495,7 +495,7 @@ class Request : public Extensible<Request>
      */
     Request(Addr paddr, unsigned size, Flags flags, RequestorID id,
         unsigned payload_size = 0, Addr offset=0) :
-        _paddr(paddr), _size(size), _requestorId(id), _time(curTick())
+        _paddr(paddr), _size(size), _requestorId(id), _time(curTick()), _offset(offset)
     {
         _flags.set(flags);
         privateFlags.set(VALID_PADDR|VALID_SIZE);
@@ -505,19 +505,8 @@ class Request : public Extensible<Request>
             _payload_size = size;
         else {
             _payload_size = payload_size;
-            _offset = offset;
         }
     }
-
-    // Request(Addr vaddr, unsigned size, Flags flags,
-    //         RequestorID id, Addr pc, ContextID cid,
-    //         AtomicOpFunctorPtr atomic_op=nullptr)
-    // {
-    //     setVirt(vaddr, size, flags, id, pc, std::move(atomic_op));
-    //     setContext(cid);
-    //     _byteEnable = std::vector<bool>(size, true);
-    //     _isGPUFuncAccess = false;
-    // }
 
     Request(Addr vaddr, unsigned size, Flags flags,
         RequestorID id, Addr pc, ContextID cid,
@@ -527,6 +516,8 @@ class Request : public Extensible<Request>
         setContext(cid);
         _byteEnable = std::vector<bool>(size, true);
         _isGPUFuncAccess = false;
+        _payload_size = size;
+        _offset = 0;
     }
 
     Request(const Request& other)
@@ -543,7 +534,8 @@ class Request : public Extensible<Request>
           _pc(other._pc), _reqInstSeqNum(other._reqInstSeqNum),
           _localAccessor(other._localAccessor),
           translateDelta(other.translateDelta),
-          accessDelta(other.accessDelta), depth(other.depth)
+          accessDelta(other.accessDelta), depth(other.depth),
+          _payload_size(other._payload_size), _offset(other._offset)
     {
         atomicOpFunctor.reset(other.atomicOpFunctor ?
                                 other.atomicOpFunctor->clone() : nullptr);
@@ -673,6 +665,13 @@ class Request : public Extensible<Request>
     {
         assert(hasPaddr());
         return _paddr;
+    }
+
+    Addr
+    getTargetPaddr() const
+    {
+        assert(hasPaddr());
+        return _paddr + (_payload_size * _offset);
     }
 
     /**

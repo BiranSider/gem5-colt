@@ -834,7 +834,12 @@ class Packet : public Printable, public Extensible<Packet>
 
     Addr getIdx() const
     {
-        return req->getOffset();
+        if (req) {
+            return req->getOffset();
+        }
+        else {
+            return 0;
+        }
     }
 
     Addr getOffset(unsigned int blk_size) const
@@ -895,7 +900,8 @@ class Packet : public Printable, public Extensible<Packet>
            htmReturnReason(HtmCacheFailure::NO_FAIL),
            htmTransactionUid(0),
            headerDelay(0), snoopDelay(0),
-           payloadDelay(0), senderState(NULL)
+           payloadDelay(0), senderState(NULL),
+           payloadSize(0)
     {
         flags.clear();
         if (req->hasPaddr()) {
@@ -971,7 +977,7 @@ class Packet : public Printable, public Extensible<Packet>
            headerDelay(pkt->headerDelay),
            snoopDelay(0),
            payloadDelay(pkt->payloadDelay),
-           senderState(pkt->senderState)
+           senderState(pkt->senderState), payloadSize(pkt->payloadSize)
     {
         if (!clear_flags)
             flags.set(pkt->flags & COPY_FLAGS);

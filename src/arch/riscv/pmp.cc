@@ -66,11 +66,11 @@ PMP::pmpCheck(const RequestPtr &req, BaseMMU::Mode mode,
 
     if (req->hasVaddr()) {
         DPRINTF(PMP, "Checking pmp permissions for va: %#x , pa: %#x\n",
-                req->getVaddr(), req->getPaddr());
+                req->getVaddr(), req->getTargetPaddr());
     }
     else { // this access is corresponding to a page table walk
         DPRINTF(PMP, "Checking pmp permissions for pa: %#x\n",
-                req->getPaddr());
+                req->getTargetPaddr());
     }
 
     // match_index will be used to identify the pmp entry
@@ -81,8 +81,8 @@ PMP::pmpCheck(const RequestPtr &req, BaseMMU::Mode mode,
     // the highest number
     for (int i = 0; i < pmpTable.size(); i++) {
         AddrRange pmp_range = pmpTable[i].pmpAddr;
-        if (pmp_range.contains(req->getPaddr()) &&
-                pmp_range.contains(req->getPaddr() + req->getSize() - 1)) {
+        if (pmp_range.contains(req->getTargetPaddr()) &&
+                pmp_range.contains(req->getTargetPaddr() + req->getPayloadSize() - 1)) {
             // according to specs address is only matched,
             // when (addr) and (addr + request_size - 1) are both
             // within the pmp range

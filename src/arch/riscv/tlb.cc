@@ -423,9 +423,6 @@ TLB::doTranslate(const RequestPtr &req, ThreadContext *tc,
             return fault;
     }
     // <--------
-    Addr directShift = e->isCoalesed ? vpn % 8: 0;
-    DPRINTF(TLB, "start: %#x direct shift calc: %d, offset: %x, direct shift from addr: %d\n",
-    e->paddr << PageShift, directShift, vaddr & mask(e->logBytes), vaddr & mask(e->logBytes) >> (e->logBytes - 3));
     /* In physical form - the more likely thing is that a logic would calculate the ppn
     with the index and than generate a regular | ppn | offset | form, here it doesn't matter
     as the same effect is generated */

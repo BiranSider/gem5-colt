@@ -324,7 +324,8 @@ Walker::isContaigous(int level, PTESv39 first_pte, PTESv39 second_pte)
     /* Simulates a gate-oriented comparision of two PTEs to detect if they
     are physically contagious
     */
-    if (first_pte.perm == second_pte.perm && first_pte)
+   uint64_t flags_mask = 0xff;
+    if (((uint64_t)first_pte & flags_mask) == ((uint64_t)second_pte & flags_mask))
     {
         Addr first_ppn = (level == 1) ? first_pte.ppn1: first_pte.ppn2;
         Addr second_ppn = (level == 1) ? second_pte.ppn1: second_pte.ppn2;
@@ -528,8 +529,9 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                                 "#0 leaf node at level %d, with vpn %#x\n",
                                  level, entry.vaddr);
 
+                        int extraCoalesingBits = 0;
+
                         // Now that we found the PTE - we want to perform coalesing logic
-                        // walker->detectCoalesing(read, level);
                         int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
                         Addr baseIndex = walker->getBaseCoalesingEntryIndex(read, coalesingData);
                         PTESv39 basePte = read->getOffsetLE<uint64_t>(baseIndex);
@@ -540,16 +542,20 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                         // This isn't correct it's temporary :(
 
                         // Add bytes as we represent coalesing.... so 3 extra
-                        int extraCoalesingByes = 0;
+                        
                         DPRINTF(PageTableWalker, "Coalesing Entry is %#x idx %d\n", coalesingData, read->getIdx());
-                        entry.paddr = basePte.ppn;
                         if ((coalesingData - (1 << read->getIdx())) != 0) {
                             DPRINTF(PageTableWalker, "We got %#x for %#x\n", coalesingData, (1 << read->getIdx()));
-                            extraCoalesingByes = 3;
+                            extraCoalesingBits = 3;
+                            // Remove the index so that the entry would represent the relative (as 0) PPN
+                            Addr relativePpnDiff = baseIndex << (level * LEVEL_BITS);
                             entry.isCoalesed = true;
-                            entry.paddr = basePte.ppn & ~((1 << 3) - 1);
+                            entry.paddr = basePte.ppn - relativePpnDiff; //& ~((1 << (3 + level * LEVEL_BITS)) - 1);
                         }
-                        entry.logBytes = PageShift + (level * LEVEL_BITS) + extraCoalesingByes;
+                        else {
+                            entry.paddr = basePte.ppn;
+                        }
+                        entry.logBytes = PageShift + (level * LEVEL_BITS) + extraCoalesingBits;
                         entry.vaddr &= ~((1 << entry.logBytes) - 1);
                         entry.pte = basePte;
                         // put it non-writable into the TLB to detect
