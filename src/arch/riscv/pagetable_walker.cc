@@ -207,6 +207,7 @@ Walker::startWalkWrapper()
     Addr vpn = getVPNFromVAddr(vaddr, currState->satp.mode);
     TlbEntry *e = tlb->lookup(vpn, currState->satp.asid, currState->mode,
                               true);
+    DPRINTF(PageTableWalker, "Tried to walk for %#x, tlb returned %#x\n", vpn, e ? e->paddr: 0);
     Fault fault = NoFault;
     if (e) {
        fault = tlb->checkPermissions(currState->status, currState->pmode,
@@ -463,12 +464,6 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
 
     if (fault == NoFault) {
         // Here we need to detect a size... I think...
-        /*
-        Basically add logic for coalecing
-        */
-
-
-
         // step 3:
         if (!pte.v || (!pte.r && pte.w)) {
             doEndWalk = true;
@@ -530,29 +525,35 @@ Walker::WalkerState::stepWalk(PacketPtr &write)
                                  level, entry.vaddr);
 
                         int extraCoalesingBits = 0;
+                        PTESv39 basePte;
+                        if (level == 0) {
+                            // Now that we found the PTE - we want to perform coalesing logic
+                            int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
+                            Addr baseIndex = walker->getBaseCoalesingEntryIndex(read, coalesingData);
+                            basePte = read->getOffsetLE<uint64_t>(baseIndex);
+                            // TODO: The size is still wrong bbut we're getting there... only for pre...
+                            entry.coalesingData = coalesingData;
 
-                        // Now that we found the PTE - we want to perform coalesing logic
-                        int8_t coalesingData = walker->indexedCoalesingEntryInformation(level, read);
-                        Addr baseIndex = walker->getBaseCoalesingEntryIndex(read, coalesingData);
-                        PTESv39 basePte = read->getOffsetLE<uint64_t>(baseIndex);
-                        // TODO: The size is still wrong bbut we're getting there... only for pre...
-                        entry.coalesingData = coalesingData;
+                            DPRINTF(PageTableWalker, "Obtained: %#x (original %#x)\n", basePte.ppn << PageShift, pte.ppn << PageShift);
+                            // This isn't correct it's temporary :(
 
-                        DPRINTF(PageTableWalker, "Obtained: %#x (original %#x)\n", basePte.ppn << PageShift, pte.ppn << PageShift);
-                        // This isn't correct it's temporary :(
-
-                        // Add bytes as we represent coalesing.... so 3 extra
-                        
-                        DPRINTF(PageTableWalker, "Coalesing Entry is %#x idx %d\n", coalesingData, read->getIdx());
-                        if ((coalesingData - (1 << read->getIdx())) != 0) {
-                            DPRINTF(PageTableWalker, "We got %#x for %#x\n", coalesingData, (1 << read->getIdx()));
-                            extraCoalesingBits = 3;
-                            // Remove the index so that the entry would represent the relative (as 0) PPN
-                            Addr relativePpnDiff = baseIndex << (level * LEVEL_BITS);
-                            entry.isCoalesed = true;
-                            entry.paddr = basePte.ppn - relativePpnDiff; //& ~((1 << (3 + level * LEVEL_BITS)) - 1);
+                            // Add bytes as we represent coalesing.... so 3 extra
+                            
+                            DPRINTF(PageTableWalker, "Coalesing Entry is %#x idx %d\n", coalesingData, read->getIdx());
+                            if ((coalesingData - (1 << read->getIdx())) != 0) {
+                                DPRINTF(PageTableWalker, "We got %#x for %#x\n", coalesingData, (1 << read->getIdx()));
+                                extraCoalesingBits = 3;
+                                // Remove the index so that the entry would represent the relative (as 0) PPN
+                                Addr relativePpnDiff = baseIndex << (level * LEVEL_BITS);
+                                entry.isCoalesed = true;
+                                entry.paddr = basePte.ppn - relativePpnDiff; //& ~((1 << (3 + level * LEVEL_BITS)) - 1);
+                            }
+                            else {
+                                entry.paddr = basePte.ppn;
+                            }
                         }
                         else {
+                            basePte = read->getOffsetLE<uint64_t>(read->getIdx());
                             entry.paddr = basePte.ppn;
                         }
                         entry.logBytes = PageShift + (level * LEVEL_BITS) + extraCoalesingBits;

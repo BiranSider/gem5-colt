@@ -132,9 +132,10 @@ TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
         entry = trie.lookup(key);
         
         if (entry) {
-            Addr coalesingIndex = (vpn >> (entry->logBytes - 3 - PageShift)) % 8;
-            DPRINTF(TLB, "Found %#x through coalesing key %#x (idx %d of %#x)\n",
-                vpn, key, coalesingIndex, entry->coalesingData);
+            Addr shiftMask = entry->logBytes - 3 - PageShift;
+            Addr coalesingIndex = (vpn >> shiftMask) % 8;
+            DPRINTF(TLB, "Found %#x through coalesing key %#x (idx %d of %#x) [%d]\n",
+                vpn, key, coalesingIndex, entry->coalesingData, shiftMask);
             if ((entry->coalesingData & (1 << coalesingIndex)) == 0) {
                 entry = nullptr;
                 DPRINTF(TLB, "Entry isn't valid for index %d\n", coalesingIndex);
