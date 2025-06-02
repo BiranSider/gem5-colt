@@ -79,6 +79,9 @@ class TLB : public BaseTLB
         statistics::Scalar writeHits;
         statistics::Scalar writeMisses;
         statistics::Scalar writeAccesses;
+        statistics::Scalar coalesingEntires;
+        statistics::Scalar coalesingHit;
+        statistics::Scalar coalesingMiss;
 
         statistics::Formula hits;
         statistics::Formula misses;

@@ -139,10 +139,12 @@ TLB::lookup(Addr vpn, uint16_t asid, BaseMMU::Mode mode, bool hidden)
             if ((entry->coalesingData & (1 << coalesingIndex)) == 0) {
                 entry = nullptr;
                 DPRINTF(TLB, "Entry isn't valid for index %d\n", coalesingIndex);
+                stats.coalesingMiss++;
             }
             else {
                 DPRINTF(TLB, "Entry valid for index %d\n", coalesingIndex);
                 coalesed = true;
+                stats.coalesingHit++;
             }
         }
     }
@@ -186,6 +188,7 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
     bool isCoalesingEntry = entry.isCoalesed;
     // If the inserted entry is a coalesed one, form a key with indicator
     if (isCoalesingEntry) {
+        stats.coalesingEntires++;
         entryKey = buildCoalesingKey(vpn, entry.asid);
         DPRINTF(TLB, "Created coalesing key: %#x\n", entryKey);
     }
@@ -225,8 +228,7 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
             newEntry->coalesingData = entry.coalesingData;
             newEntry->logBytes = entry.logBytes;
             newEntry->isCoalesed = entry.isCoalesed;
-            newEntry->logBytes = entry.logBytes;
-            trie.insert(
+            newEntry->trieHandle = trie.insert(
                 entryKey, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
             );
             return newEntry;
@@ -252,7 +254,8 @@ TLB::insert(Addr vpn, const TlbEntry &entry)
     newEntry->trieHandle = trie.insert(
         entryKey, TlbEntryTrie::MaxBits - entry.logBytes + PageShift, newEntry
     );
-    DPRINTF(TLB, "Inserted successfully at %#x\n", entryKey);
+    TlbEntry *finalEntry = trie.lookup(entryKey);
+    DPRINTF(TLB, "Inserted successfully at %#x bytes %d (registered %d)\n", entryKey, entry.logBytes, finalEntry->logBytes);
     
     return newEntry;
 }
@@ -285,7 +288,11 @@ TLB::demapPage(Addr vaddr, uint64_t asid)
             if (entry) {
                 if (entry->isCoalesed && (entry->coalesingData != (1 << (vpn % 8))))
                 {
-                    entry->coalesingData -= (1 << (vpn & 8));
+                    Addr negMask = ~(1 << (vpn % 8));
+                    entry->coalesingData &= negMask;
+                    if (entry->coalesingData == 0) {
+                        remove(entry - tlb.data());
+                    }
                 }
                 else
                     remove(entry - tlb.data());
@@ -649,7 +656,12 @@ TLB::TlbStats::TlbStats(statistics::Group *parent)
              "Total TLB (read and write) misses", readMisses + writeMisses),
     ADD_STAT(accesses, statistics::units::Count::get(),
              "Total TLB (read and write) accesses",
-             readAccesses + writeAccesses)
+             readAccesses + writeAccesses),
+    ADD_STAT(coalesingEntires, statistics::units::Count::get(), "coalesing entries"),
+    ADD_STAT(coalesingHit, statistics::units::Count::get(), "coalesing hit"),
+    ADD_STAT(coalesingMiss, statistics::units::Count::get(), "coalesing miss")
+
+
 {
 }
 
